@@ -14,6 +14,18 @@ import "strconv"
 // and reply for an RPC.
 //
 
+const (
+	MapTask = iota
+	ReduceTask
+	NoTaskAvailable
+	AllTaskFinished
+)
+
+const (
+	Ack = iota
+	TaskExpired
+)
+
 type ExampleArgs struct {
 	X int
 }
@@ -24,6 +36,27 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 
+type DistributeArgs struct {
+}
+
+type DistributeReply struct {
+	TaskType    int
+	TaskNo      int
+	ReduceNum   int
+	TaskVersion int
+	Files       []string
+}
+
+type CompleteArgs struct {
+	TaskType    int
+	TaskNo      int
+	TaskVersion int
+	Results     []string
+}
+
+type CompleteReply struct {
+	Ack int
+}
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the master.
