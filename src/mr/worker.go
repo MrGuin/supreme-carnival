@@ -52,19 +52,19 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// call rpc to request for a task in a loop with time.Sleep
 	for {
-		fmt.Println("new round, requesting for task...")
+		//fmt.Println("new round, requesting for task...")
 		reply := requestTask()
 		switch reply.TaskType {
 		case NoTaskAvailable:
 			time.Sleep(100 * time.Millisecond)
 		case AllTaskFinished:
-			fmt.Printf("all tasks done, worker exiting...")
+			//fmt.Printf("all tasks done, worker exiting...")
 			return
 		case MapTask:
 			taskId := reply.TaskNo
 			reduceNum := reply.ReduceNum
 			filename := reply.Files[0]
-			fmt.Printf("map task %d received\n", taskId)
+			//fmt.Printf("map task %d received\n", taskId)
 			results := handleMapTask(taskId, reduceNum, filename, mapf)
 
 			//notify master
@@ -75,11 +75,11 @@ func Worker(mapf func(string, string) []KeyValue,
 		case ReduceTask:
 			taskId := reply.TaskNo
 			filenames := reply.Files
-			fmt.Printf("reduce task %d received\n", taskId)
+			//fmt.Printf("reduce task %d received\n", taskId)
 			results := handleReduceTask(taskId, filenames, reducef)
 
 			res, ack := notify(ReduceTask, taskId, reply.TaskVersion, results)
-			fmt.Printf("reduce task %d received\n", taskId)
+			//fmt.Printf("reduce task %d received\n", taskId)
 			if res == false || ack == TaskExpired {
 				clean(results)
 			}
@@ -92,7 +92,7 @@ func Worker(mapf func(string, string) []KeyValue,
 }
 
 func handleMapTask(taskId int, reduceNum int, filename string, mapf func(string, string) []KeyValue) (results []string) {
-	fmt.Printf("start handling map task %d...\n", taskId)
+	//fmt.Printf("start handling map task %d...\n", taskId)
 	// prepare
 	var kvs []KeyValue
 	file, err := os.Open(filename)
@@ -129,7 +129,7 @@ func handleMapTask(taskId int, reduceNum int, filename string, mapf func(string,
 }
 
 func handleReduceTask(taskId int, filenames []string, reducef func(string, []string) string) (results []string) {
-	fmt.Printf("start handling reduce task %d...\n", taskId)
+	//fmt.Printf("start handling reduce task %d...\n", taskId)
 	var kvs []KeyValue
 
 	// extract file contents
@@ -246,7 +246,7 @@ func requestTask() DistributeReply {
 }
 
 func notify(taskType int, taskNo int, taskVersion int, results []string) (bool, int) {
-	fmt.Printf("task type: %d no: %d finished, notifying master...\n", taskType, taskNo)
+	//fmt.Printf("task type: %d no: %d finished, notifying master...\n", taskType, taskNo)
 	args := CompleteArgs{
 		TaskType:    taskType,
 		TaskNo:      taskNo,

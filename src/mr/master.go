@@ -1,7 +1,6 @@
 package mr
 
 import (
-	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -71,7 +70,7 @@ func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
 
 // request for a task
 func (m *Master) DistributeTask(args *DistributeArgs, reply *DistributeReply) error {
-	fmt.Println("distributing task...")
+	//fmt.Println("distributing task...")
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	switch m.currentStage {
@@ -106,7 +105,7 @@ func (m *Master) DistributeTask(args *DistributeArgs, reply *DistributeReply) er
 
 // complete the task
 func (m *Master) CompleteTask(args *CompleteArgs, reply *CompleteReply) error {
-	fmt.Println("one task finished, analyzing...")
+	//fmt.Println("one task finished, analyzing...")
 	switch args.TaskType {
 	case MapTask:
 		m.mu.Lock()
@@ -116,7 +115,7 @@ func (m *Master) CompleteTask(args *CompleteArgs, reply *CompleteReply) error {
 		if taskVersion == mt.version {
 			mt.state = Complete
 			reply.Ack = Ack
-			fmt.Printf("map task %d finished, state updated, notifying task's monitor...", mt.index)
+			//fmt.Printf("map task %d finished, state updated, notifying task's monitor...", mt.index)
 
 			mt.done <- struct{}{}
 
@@ -179,9 +178,9 @@ func (m *Master) monitorTimeout(task interface{}) {
 			t.version++
 			t.state = Idle
 			m.mu.Unlock()
-			fmt.Printf("map task %d timeout, recycled", t.index)
+			//fmt.Printf("map task %d timeout, recycled", t.index)
 		case <-t.done:
-			fmt.Printf("map task %d finished, monitor quit", t.index)
+			//fmt.Printf("map task %d finished, monitor quit", t.index)
 			return
 		}
 	case *reduceTask:
@@ -191,9 +190,9 @@ func (m *Master) monitorTimeout(task interface{}) {
 			t.version++
 			t.state = Idle
 			m.mu.Unlock()
-			fmt.Printf("reduce task %d timeout, recycled", t.index)
+			//fmt.Printf("reduce task %d timeout, recycled", t.index)
 		case <-t.done:
-			fmt.Printf("map task %d finished, monitor quit", t.index)
+			//fmt.Printf("map task %d finished, monitor quit", t.index)
 			return
 		}
 	}
@@ -214,7 +213,7 @@ func (m *Master) stageMonitor() {
 	}
 	m.currentStage = AllComplete
 	m.mu.Unlock()
-	fmt.Println("all tasks done, good job!")
+	//fmt.Println("all tasks done, good job!")
 }
 
 // assuming lock held
@@ -222,7 +221,7 @@ func (m *Master) getAMapTask() *mapTask {
 	for _, mt := range m.mapTasks {
 		if mt.state == Idle {
 			mt.state = Assigned
-			fmt.Printf("map task %d assigned", mt.index)
+			//fmt.Printf("map task %d assigned", mt.index)
 			return mt
 		}
 	}
