@@ -1,4 +1,4 @@
 # supreme-carnival
-Distributed systems
+Distributed systems.
 
 Currently only lab1 map-reduce done.
