@@ -310,7 +310,7 @@ func (rf *Raft) killed() bool {
 // start a new election
 func (rf *Raft) startElection() {
 	rf.mu.Lock()
-	DPrintf("server %d term %d starting election\n", rf.me, rf.currentTerm)
+	DPrintf("candidate %d term %d starting election\n", rf.me, rf.currentTerm)
 	rf.votedFor = rf.me
 	term := rf.currentTerm
 	totalNum := len(rf.peers)
@@ -319,20 +319,23 @@ func (rf *Raft) startElection() {
 	var votesRcvd int32 // votes counter
 	votesRcvd = 1
 	finished := 1
-	var mu sync.Mutex
+	var mu sync.Mutex	// guard access for votesRcvd and finished
 	cond := sync.NewCond(&mu)
 
 	for pr := range rf.peers {
 		// send RequestVote RPC to all servers and update the result
+		if pr == rf.me {
+			continue
+		}
 		go func(server int) {
-			if server == rf.me {
-				return
-			}
 			voteGranted := rf.callRequestVote(server, term)
+			DPrintf("candidate %d RequestVote for server %d in term %d returned\n", rf.me, server, term)
 			mu.Lock()
 			if voteGranted {
-				DPrintf("candidate %d got vote from server %d in term %d\n", rf.me, server, term)
 				votesRcvd++
+				DPrintf("😊candidate %d got vote from server %d in term %d, %d votes received\n", rf.me, server, term, votesRcvd)
+			} else {
+				DPrintf("😭candidate %d didn't got vote from server %d in term %d, the reason could be either the network loss or candidate is unqualified to voter. %d votes received\n", rf.me, server, term, votesRcvd)
 			}
 			finished++
 			mu.Unlock()
@@ -354,10 +357,11 @@ func (rf *Raft) startElection() {
 
 	// waiting for vote result.
 	mu.Lock()
-	for int(votesRcvd) < totalNum/2 && finished != totalNum {
+	for (int(votesRcvd) <= totalNum/2) && (finished != totalNum) {
+		DPrintf("candidate %d waiting for vote in term %d complete\n", rf.me, term)
 		cond.Wait()
 	}
-	DPrintf("candidate %d vote finished for term %d, %d/%d\n", rf.me, term, votesRcvd, totalNum)
+	DPrintf("candidate %d vote finished for term %d, %d/%d\n", rf.me, term, atomic.LoadInt32(&votesRcvd), totalNum)
 	defer mu.Unlock()
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -400,9 +404,10 @@ func (rf *Raft) callRequestVote(server, term int) bool {
 }
 
 // send AppendEntries RPC to server.
-// return true if no new leader occurs.
+// return true if no new leader occurs, including reply lost.
+// return false only when a new leader occurs.
 func (rf *Raft) callAppendEntries(server, term int) bool {
-	DPrintf("leader %d term %d sending heartbeats to server %d\n", rf.me, term, server)
+	DPrintf("leader %d of term %d sending heartbeats to server %d\n", rf.me, term, server)
 	args := &AppendEntriesArgs{
 		Term:     term,
 		LeaderId: rf.me,
@@ -438,7 +443,7 @@ func (rf *Raft) becomeCandidate() {
 	rf.mu.Lock()
 	rf.state = candidate
 	rf.currentTerm++
-	DPrintf("server %d becomes candidate in new term %d\n", rf.me, rf.currentTerm)
+	DPrintf("💪server %d becomes candidate in new term %d\n", rf.me, rf.currentTerm)
 	rf.mu.Unlock()
 	go rf.startElection()
 }
@@ -446,7 +451,7 @@ func (rf *Raft) becomeCandidate() {
 // server state transit from candidate to leader.
 // assuming lock held.
 func (rf *Raft) becomeLeader() {
-	DPrintf("server %d becomes leader in term %d\n", rf.me, rf.currentTerm)
+	DPrintf("✨candidate %d becomes leader in term %d\n", rf.me, rf.currentTerm)
 	rf.state = leader
 	go rf.broadCastPeriodically()
 }
@@ -454,14 +459,22 @@ func (rf *Raft) becomeLeader() {
 // for a leader to broadcast heartbeats periodically to all servers.
 func (rf *Raft) broadCastPeriodically() {
 	rf.mu.Lock()
-	term := rf.currentTerm
+	leaderTerm := rf.currentTerm
 	rf.mu.Unlock()
-	DPrintf("leader %d in term %d start broadCast heartbeats to all servers\n", rf.me, term)
+	DPrintf("leader %d in term %d start broadCast heartbeats to all servers\n", rf.me, leaderTerm)
 	var done int32 = 0 // new leader elected
 	for !rf.killed() {
+		// send heartbeats only when rf.me is still leader
+		curTerm, isLeader := rf.GetState()
+		if !isLeader || curTerm != leaderTerm {	// rf.me is no longer leader or/and leaderTerm out of date
+			return
+		}
 		for pr := range rf.peers {
+			if pr == rf.me {
+				continue
+			}
 			go func(server int) {
-				ok := rf.callAppendEntries(server, term)
+				ok := rf.callAppendEntries(server, leaderTerm)
 				if !ok {
 					atomic.StoreInt32(&done, 1)
 				}
@@ -498,7 +511,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	//rf.log = make([]*logEntry)
 	rf.resetTimeout = make(chan struct{})
 
-	DPrintf("server %d initialized\n", rf.me)
+	DPrintf("server %d term %d initialized\n", rf.me, rf.currentTerm)
 
 	// start election timeout watcher
 	go func() {
