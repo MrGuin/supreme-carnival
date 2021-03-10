@@ -526,7 +526,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 					rf.becomeCandidate()
 				}
 			case <-rf.resetTimeout:
-				DPrintf("server %d election timeout watcher new round\n", rf.me)
+				DPrintf("server %d election timeout reset\n", rf.me)
 				continue
 			}
 		}
