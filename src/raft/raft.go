@@ -373,8 +373,10 @@ func (rf *Raft) startElection() {
 		rf.becomeLeader()
 	} else { // transit back to follower if lost or voting expired
 		DPrintf("oops! candidate %d didn't get enough votes in the election of term %d, and will return follower soon\n", rf.me, term)
-		rf.becomeFollower(-1)
-		rf.resetTimeout <- struct{}{}
+		if term == rf.currentTerm {		// check currentTerm
+			rf.becomeFollower(-1)
+			rf.resetTimeout <- struct{}{}
+		}
 	}
 }
 
