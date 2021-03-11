@@ -52,10 +52,12 @@ type logEntry struct {
 }
 
 // server state
+type State string
+
 const (
-	follower = iota
-	candidate
-	leader
+	follower  State = "follower"
+	candidate       = "candidate"
+	leader          = "leader"
 )
 
 //
@@ -72,7 +74,7 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
-	state int32 // current state
+	state State // current state
 
 	// Persistent states.
 	currentTerm int
@@ -314,13 +316,13 @@ func (rf *Raft) startElection() {
 	rf.votedFor = rf.me
 	term := rf.currentTerm
 	totalNum := len(rf.peers)
-	rf.mu.Unlock()
+	rf.mu.Unlock() // after fetching the arguments we need, release the lock to avoid holding the lock while sending RPC
 
 	var votesRcvd int32 // votes counter
 	votesRcvd = 1
 	finished := 1
-	var mu sync.Mutex	// guard access for votesRcvd and finished
-	cond := sync.NewCond(&mu)
+	var mu sync.Mutex         // guard access for votesRcvd and finished
+	cond := sync.NewCond(&mu) // condition variable for waiting for the election to end
 
 	for pr := range rf.peers {
 		// send RequestVote RPC to all servers and update the result
@@ -335,7 +337,7 @@ func (rf *Raft) startElection() {
 				votesRcvd++
 				DPrintf("😊candidate %d got vote from server %d in term %d, %d votes received\n", rf.me, server, term, votesRcvd)
 			} else {
-				DPrintf("😭candidate %d didn't got vote from server %d in term %d, the reason could be either the network loss or candidate is unqualified to voter. %d votes received\n", rf.me, server, term, votesRcvd)
+				DPrintf("😭candidate %d didn't got vote from server %d in term %d, the reason could be either the network loss or the voter didn't recognize the candidate. %d votes received\n", rf.me, server, term, votesRcvd)
 			}
 			finished++
 			mu.Unlock()
@@ -431,14 +433,15 @@ func (rf *Raft) callAppendEntries(server, term int) bool {
 // server state transits to follower.
 // assuming lock held.
 func (rf *Raft) becomeFollower(newTerm int) {
-	rf.state = follower
-	if newTerm > rf.currentTerm {
+	if newTerm >= rf.currentTerm {	// become follower only when newTerm is at least as upto date as currentTerm
 		rf.currentTerm = newTerm
+		rf.state = follower
 	}
 	DPrintf("server %d becomes follower in term %d\n", rf.me, rf.currentTerm)
 	rf.votedFor = -1
 }
 
+// server increases term, becomes candidate and initiates an election
 func (rf *Raft) becomeCandidate() {
 	rf.mu.Lock()
 	rf.state = candidate
@@ -462,11 +465,11 @@ func (rf *Raft) broadCastPeriodically() {
 	leaderTerm := rf.currentTerm
 	rf.mu.Unlock()
 	DPrintf("leader %d in term %d start broadCast heartbeats to all servers\n", rf.me, leaderTerm)
-	var done int32 = 0 // new leader elected
+	var done int32 = 0 // new leader emerges
 	for !rf.killed() {
-		// send heartbeats only when rf.me is still leader
+		// before sending heartbeats, check if rf.me is still a valid leader
 		curTerm, isLeader := rf.GetState()
-		if !isLeader || curTerm != leaderTerm {	// rf.me is no longer leader or/and leaderTerm out of date
+		if !isLeader || curTerm != leaderTerm { // rf.me is no longer leader or/and leaderTerm out of date
 			return
 		}
 		for pr := range rf.peers {
@@ -475,7 +478,7 @@ func (rf *Raft) broadCastPeriodically() {
 			}
 			go func(server int) {
 				ok := rf.callAppendEntries(server, leaderTerm)
-				if !ok {
+				if !ok { // a new leader of higher term occurred
 					atomic.StoreInt32(&done, 1)
 				}
 			}(pr)
@@ -538,6 +541,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
+// generate election timeout
 func genTimeout() time.Duration {
 	ms := 240 + rand.Intn(240)
 	return time.Duration(ms) * time.Millisecond
