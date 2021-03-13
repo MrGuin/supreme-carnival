@@ -181,12 +181,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
-		DPrintf("server %d vote denied for candidate %d in term %d\n", rf.me, args.CandidateId, args.Term)
+		DPrintf("server %d in term %d denied RequestVote from candidate %d in term %d\n", rf.me, rf.currentTerm, args.CandidateId, args.Term)
 		return
 	}
 	if args.Term > rf.currentTerm {
 		rf.becomeFollower(args.Term)
-		rf.votedFor = -1
 	}
 	//if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && args.LastLogIndex >= rf.commitIndex {
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
@@ -194,7 +193,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 		rf.resetTimeout <- struct{}{}
-		DPrintf("server %d vote granted for candidate %d in term %d\n", rf.me, args.CandidateId, args.Term)
+		DPrintf("server %d granted vote to candidate %d in term %d\n", rf.me, args.CandidateId, args.Term)
 	} else {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
@@ -311,12 +310,14 @@ func (rf *Raft) killed() bool {
 
 // start a new election
 func (rf *Raft) startElection() {
+	// election preparation
 	rf.mu.Lock()
-	DPrintf("candidate %d term %d starting election\n", rf.me, rf.currentTerm)
 	rf.votedFor = rf.me
-	term := rf.currentTerm
+	candidateTerm := rf.currentTerm
 	totalNum := len(rf.peers)
 	rf.mu.Unlock() // after fetching the arguments we need, release the lock to avoid holding the lock while sending RPC
+
+	DPrintf("candidate %d term %d starting election\n", rf.me, candidateTerm)
 
 	var votesRcvd int32 // votes counter
 	votesRcvd = 1
@@ -330,14 +331,14 @@ func (rf *Raft) startElection() {
 			continue
 		}
 		go func(server int) {
-			voteGranted := rf.callRequestVote(server, term)
-			DPrintf("candidate %d RequestVote for server %d in term %d returned\n", rf.me, server, term)
+			voteGranted := rf.callRequestVote(server, candidateTerm)
+			DPrintf("candidate %d RequestVote for server %d in term %d returned\n", rf.me, server, candidateTerm)
 			mu.Lock()
 			if voteGranted {
 				votesRcvd++
-				DPrintf("😊candidate %d got vote from server %d in term %d, %d votes received\n", rf.me, server, term, votesRcvd)
+				DPrintf("😊candidate %d got vote from server %d in term %d, %d votes received\n", rf.me, server, candidateTerm, votesRcvd)
 			} else {
-				DPrintf("😭candidate %d didn't got vote from server %d in term %d, the reason could be either the network loss or the voter didn't recognize the candidate. %d votes received\n", rf.me, server, term, votesRcvd)
+				DPrintf("😭candidate %d didn't got vote from server %d in term %d, the reason could be either the network loss or the voter didn't recognize the candidate. %d votes received\n", rf.me, server, candidateTerm, votesRcvd)
 			}
 			finished++
 			mu.Unlock()
@@ -360,35 +361,35 @@ func (rf *Raft) startElection() {
 	// waiting for vote result.
 	mu.Lock()
 	for (int(votesRcvd) <= totalNum/2) && (finished != totalNum) {
-		DPrintf("candidate %d waiting for vote in term %d complete\n", rf.me, term)
+		DPrintf("candidate %d waiting for vote in term %d complete\n", rf.me, candidateTerm)
 		cond.Wait()
 	}
-	DPrintf("candidate %d vote finished for term %d, %d/%d\n", rf.me, term, atomic.LoadInt32(&votesRcvd), totalNum)
+	DPrintf("candidate %d vote finished for term %d, %d/%d\n", rf.me, candidateTerm, atomic.LoadInt32(&votesRcvd), totalNum)
 	defer mu.Unlock()
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	// become leader if win
-	if int(votesRcvd) > totalNum/2 && rf.currentTerm == term { // double check rf is still in the voting term
-		DPrintf("congrats! candidate %d got votes from majority in the election of term %d, and will become leader soon\n", rf.me, term)
+	if int(votesRcvd) > totalNum/2 && rf.currentTerm == candidateTerm { // double check rf is still in the voting term
+		DPrintf("congrats! candidate %d got votes from majority in the election of term %d, and will become leader soon\n", rf.me, candidateTerm)
 		rf.becomeLeader()
 	} else { // transit back to follower if lost or voting expired
-		DPrintf("oops! candidate %d didn't get enough votes in the election of term %d, and will return follower soon\n", rf.me, term)
-		if term == rf.currentTerm {		// check currentTerm
-			rf.becomeFollower(-1)
-			rf.resetTimeout <- struct{}{}
+		DPrintf("oops! candidate %d didn't get enough votes in the election of term %d, election lost\n", rf.me, candidateTerm)
+		if candidateTerm == rf.currentTerm { // check currentTerm
+			rf.becomeFollower(candidateTerm)
+			//rf.resetTimeout <- struct{}{}
 		}
 	}
 }
 
 // send RequestVote RPC to server.
 // returns true if voteGranted.
-func (rf *Raft) callRequestVote(server, term int) bool {
-	DPrintf("candidate %d term %d sending RequestVote to server %d\n", rf.me, term, server)
+func (rf *Raft) callRequestVote(server, candidateTerm int) bool {
+	DPrintf("candidate %d term %d sending RequestVote to server %d\n", rf.me, candidateTerm, server)
 	args := &RequestVoteArgs{
-		Term:         term,
+		Term:         candidateTerm,
 		CandidateId:  rf.me,
 		LastLogIndex: 1,
-		LastLogTerm:  term,
+		LastLogTerm:  candidateTerm,
 		//LastLogIndex: rf.commitIndex,
 		//LastLogTerm:  rf.log[rf.commitIndex].term,
 	}
@@ -410,10 +411,10 @@ func (rf *Raft) callRequestVote(server, term int) bool {
 // send AppendEntries RPC to server.
 // return true if no new leader occurs, including reply lost.
 // return false only when a new leader occurs.
-func (rf *Raft) callAppendEntries(server, term int) bool {
-	DPrintf("leader %d of term %d sending heartbeats to server %d\n", rf.me, term, server)
+func (rf *Raft) callAppendEntries(server, leaderTerm int) bool {
+	DPrintf("leader %d of term %d sending heartbeats to server %d\n", rf.me, leaderTerm, server)
 	args := &AppendEntriesArgs{
-		Term:     term,
+		Term:     leaderTerm,
 		LeaderId: rf.me,
 	}
 	reply := &AppendEntriesReply{}
@@ -435,12 +436,16 @@ func (rf *Raft) callAppendEntries(server, term int) bool {
 // server state transits to follower.
 // assuming lock held.
 func (rf *Raft) becomeFollower(newTerm int) {
-	if newTerm >= rf.currentTerm {	// become follower only when newTerm is at least as upto date as currentTerm
+	// become follower only when newTerm is at least as upto date as currentTerm
+	if newTerm < rf.currentTerm {
+		return
+	}
+	rf.state = follower
+	if newTerm > rf.currentTerm {	// update term
 		rf.currentTerm = newTerm
-		rf.state = follower
+		rf.votedFor = -1
 	}
 	DPrintf("server %d becomes follower in term %d\n", rf.me, rf.currentTerm)
-	rf.votedFor = -1
 }
 
 // server increases term, becomes candidate and initiates an election
