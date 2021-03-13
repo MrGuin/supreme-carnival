@@ -89,7 +89,9 @@ type Raft struct {
 	nextIndex  []int
 	matchIndex []int
 
-	resetTimeout chan struct{} // channel to reset election timeout
+	// channel to reset election timeout,
+	// which should be sent through only by the two RPC handler.
+	resetTimeout chan struct{}
 }
 
 // return currentTerm and whether this server
@@ -326,7 +328,7 @@ func (rf *Raft) startElection() {
 	cond := sync.NewCond(&mu) // condition variable for waiting for the election to end
 
 	for pr := range rf.peers {
-		// send RequestVote RPC to all servers and update the result
+		// send RequestVote RPC to all servers and handle the result
 		if pr == rf.me {
 			continue
 		}
@@ -344,21 +346,9 @@ func (rf *Raft) startElection() {
 			mu.Unlock()
 			cond.Broadcast()
 		}(pr)
-
-		//go func(server int) {
-		//	if voteGranted := rf.callRequestVote(server, term); voteGranted {
-		//		atomic.AddInt32(&votesRcvd, 1)
-		//		curVotes := atomic.LoadInt32(&votesRcvd)
-		//		rf.mu.Lock()
-		//		defer rf.mu.Unlock()
-		//		if int(curVotes) > len(rf.peers) && rf.state == candidate {
-		//			rf.state = leader
-		//		}
-		//	}
-		//}(pr)
 	}
 
-	// waiting for vote result.
+	// waiting for the vote result.
 	mu.Lock()
 	for (int(votesRcvd) <= totalNum/2) && (finished != totalNum) {
 		DPrintf("candidate %d waiting for vote in term %d complete\n", rf.me, candidateTerm)
@@ -376,7 +366,6 @@ func (rf *Raft) startElection() {
 		DPrintf("oops! candidate %d didn't get enough votes in the election of term %d, election lost\n", rf.me, candidateTerm)
 		if candidateTerm == rf.currentTerm { // check currentTerm
 			rf.becomeFollower(candidateTerm)
-			//rf.resetTimeout <- struct{}{}
 		}
 	}
 }
@@ -437,13 +426,13 @@ func (rf *Raft) callAppendEntries(server, leaderTerm int) bool {
 // assuming lock held.
 func (rf *Raft) becomeFollower(newTerm int) {
 	// become follower only when newTerm is at least as upto date as currentTerm
-	if newTerm < rf.currentTerm {
+	if newTerm < rf.currentTerm { // a stale request
 		return
 	}
 	rf.state = follower
-	if newTerm > rf.currentTerm {	// update term
+	if newTerm > rf.currentTerm { // entering a new term
 		rf.currentTerm = newTerm
-		rf.votedFor = -1
+		rf.votedFor = -1 // currentTerm increment should always be accompanied by votedFor reset
 	}
 	DPrintf("server %d becomes follower in term %d\n", rf.me, rf.currentTerm)
 }
@@ -453,6 +442,7 @@ func (rf *Raft) becomeCandidate() {
 	rf.mu.Lock()
 	rf.state = candidate
 	rf.currentTerm++
+	rf.votedFor = -1
 	DPrintf("💪server %d becomes candidate in new term %d\n", rf.me, rf.currentTerm)
 	rf.mu.Unlock()
 	go rf.startElection()
