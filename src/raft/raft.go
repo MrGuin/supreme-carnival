@@ -18,7 +18,9 @@ package raft
 //
 
 import (
+	"log"
 	"math/rand"
+	"os"
 	"sync"
 	"time"
 )
@@ -359,7 +361,7 @@ func (rf *Raft) startElection() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	// become leader if win
-	if int(votesRcvd) > totalNum/2 && rf.currentTerm == candidateTerm { // double check rf is still in the voting term
+	if int(votesRcvd) > totalNum/2 && rf.currentTerm == candidateTerm && rf.state == candidate { // double check whether election is still valid
 		DPrintf("congrats! candidate %d got votes from majority in the election of term %d, and will become leader soon\n", rf.me, candidateTerm)
 		rf.becomeLeader()
 	} else { // transit back to follower if lost or voting expired
@@ -383,18 +385,29 @@ func (rf *Raft) callRequestVote(server, candidateTerm int) bool {
 		//LastLogTerm:  rf.log[rf.commitIndex].term,
 	}
 	reply := &RequestVoteReply{}
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	if ok {
-		if reply.VoteGranted {
-			return true
-		}
+	for {	// repeat request indefinitely until we get a reply
 		rf.mu.Lock()
-		defer rf.mu.Unlock()
-		if reply.Term > rf.currentTerm {
-			rf.becomeFollower(reply.Term)
+		currentTerm := rf.currentTerm
+		currentState := rf.state
+		rf.mu.Unlock()
+		if currentTerm == candidateTerm && currentState == candidate {	// check current state
+			ok := rf.peers[server].Call("Raft.RequestVote", args, reply)	// send RequestVote RPC
+			if ok {		// got reply
+				if reply.VoteGranted {
+					return true
+				}
+				rf.mu.Lock()
+				if reply.Term > rf.currentTerm {
+					rf.becomeFollower(reply.Term)
+				}
+				rf.mu.Unlock()
+				return false
+			}
+			continue	// no reply, repeat sending RequestVote RPC
+		} else {
+			return false
 		}
 	}
-	return false
 }
 
 // send AppendEntries RPC to server.
@@ -546,4 +559,6 @@ func genTimeout() time.Duration {
 
 func init() {
 	rand.Seed(time.Now().UnixNano())
+	logFile, _ := os.Create("log" + time.Now().String())
+	log.SetOutput(logFile)
 }
