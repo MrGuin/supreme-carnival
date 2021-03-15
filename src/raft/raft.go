@@ -438,7 +438,6 @@ func (rf *Raft) callRequestVote(server, candidateTerm int) bool {
 // return false only when a new leader occurs.
 func (rf *Raft) callAppendEntries(server, leaderTerm int) bool {
 	DPrintf("leader %d of term %d sending heartbeats to server %d\n", rf.me, leaderTerm, server)
-	for {
 		// prepare arguments
 		rf.mu.Lock()
 		if rf.currentTerm != leaderTerm { // term changed, abandon all
@@ -453,9 +452,12 @@ func (rf *Raft) callAppendEntries(server, leaderTerm int) bool {
 			LeaderCommit: rf.commitIndex,
 		}
 		lastEntrySent := len(rf.log) - 1
+		//fmt.Println(rf.log)
 		if len(rf.log) > rf.nextIndex[server] {
 			args.PrevLogIndex = rf.nextIndex[server] - 1
-			args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+			if rf.log[args.PrevLogIndex] != nil {
+				args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+			}
 			args.Entries = rf.log[rf.nextIndex[server]:]
 		}
 		rf.mu.Unlock()
@@ -466,30 +468,25 @@ func (rf *Raft) callAppendEntries(server, leaderTerm int) bool {
 
 		// process result
 		rf.mu.Lock()
+		defer rf.mu.Unlock()
 		if rf.currentTerm != leaderTerm { // outdated
-			rf.mu.Unlock()
 			return false
 		}
 		if ok {
 			if reply.Term > leaderTerm {
-				rf.mu.Unlock()
 				return false
 			}
 			if reply.Success {
 				rf.nextIndex[server] += entriesSent
 				rf.matchIndex[server] = lastEntrySent
-				rf.mu.Unlock()
 				return true
 			} else { // consistency check failed, decrement nextIndex and retry immediately
 				DPrintf("server %d consistency check failed\n", server)
 				rf.nextIndex[server]--
-				rf.mu.Unlock()
-				continue
 			}
 		}
-		rf.mu.Unlock()
-		time.Sleep(30 * time.Millisecond) // wait for 20 milliseconds and retry
-	}
+		DPrintf("leader %d of term %d didn't get AppendEntries reply from server %d\n", rf.me, leaderTerm, server)
+		return false
 }
 
 // server state transits to follower.
@@ -504,7 +501,7 @@ func (rf *Raft) becomeFollower(newTerm int) {
 		rf.currentTerm = newTerm
 		rf.votedFor = -1 // currentTerm increment should always be accompanied by votedFor reset
 	}
-	DPrintf("server %d becomes follower in term %d\n", rf.me, rf.currentTerm)
+	DPrintf("😈server %d becomes follower in term %d\n", rf.me, rf.currentTerm)
 }
 
 // server increases term, becomes candidate and initiates an election
