@@ -243,9 +243,34 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		return
 	}
-	rf.log = rf.log[:args.PrevLogIndex+1]
-	rf.log = append(rf.log, args.Entries...)
-	rf.commitIndex = args.LeaderCommit
+	if len(args.Entries) > 0 { // new entries to append
+		// find first conflict entry index
+		conflictIndex := args.PrevLogIndex + 1
+		entryIndex := 0
+		for conflictIndex < len(rf.log) && entryIndex < len(args.Entries) {
+			if rf.log[conflictIndex].Term != args.Entries[entryIndex].Term {
+				break
+			}
+			conflictIndex++
+			entryIndex++
+		}
+		rf.log = rf.log[:conflictIndex]
+		rf.log = append(rf.log, args.Entries[entryIndex:]...)
+		DPrintf("server %d in term %d append new entries: [%d, %d]\n", rf.me, rf.currentTerm, conflictIndex, len(rf.log)-1)
+	}
+	if args.LeaderCommit > rf.commitIndex { // AppendEntries RPC no.5
+		lastLogIndex := len(rf.log) - 1
+		if args.LeaderCommit < lastLogIndex {
+			rf.commitIndex = args.LeaderCommit
+		} else {
+			rf.commitIndex = lastLogIndex
+		}
+	}
+	DPrintf("server %d in term %d commitIndex updated: %d\n", rf.me, rf.currentTerm, rf.commitIndex)
+
+	if rf.commitIndex > rf.lastApplied {
+		rf.lastApplied = rf.commitIndex
+	}
 	reply.Success = true
 }
 
@@ -319,6 +344,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	index = len(rf.log)
 	rf.log = append(rf.log, entry)
+	rf.lastApplied = index
 
 	return index, term, isLeader
 }
@@ -582,6 +608,7 @@ func (rf *Raft) broadCastPeriodically() {
 				cond.Wait()
 			}
 			rf.commitIndex = N
+			DPrintf("leader %d of term %d commitIndex updated: %d\n", rf.me, leaderTerm, N)
 			rf.mu.Unlock()
 			N++
 		}
