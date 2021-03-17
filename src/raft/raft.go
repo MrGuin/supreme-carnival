@@ -88,6 +88,8 @@ type Raft struct {
 	commitIndex int
 	lastApplied int
 
+	applyCh chan ApplyMsg
+
 	// Volatile states on leaders.
 	nextIndex  []int
 	matchIndex []int
@@ -228,6 +230,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	DPrintf("server %d handling AppendEntries from server %d of term %d\n", rf.me, args.LeaderId, args.Term)
+	DPrintf("server %d term %d before handling AppendEntries, logs: %v\n", rf.me, rf.currentTerm, rf.log[1:])
 	reply.Term = rf.currentTerm     // set term for leader to update itself
 	if args.Term < rf.currentTerm { // request from outdated leader
 		reply.Success = false
@@ -259,19 +262,36 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		DPrintf("server %d in term %d append new entries: [%d, %d]\n", rf.me, rf.currentTerm, conflictIndex, len(rf.log)-1)
 	}
 	if args.LeaderCommit > rf.commitIndex { // AppendEntries RPC no.5
+		//lastCommitIndex := rf.commitIndex
 		lastLogIndex := len(rf.log) - 1
 		if args.LeaderCommit < lastLogIndex {
 			rf.commitIndex = args.LeaderCommit
 		} else {
 			rf.commitIndex = lastLogIndex
 		}
-	}
-	DPrintf("server %d in term %d commitIndex updated: %d\n", rf.me, rf.currentTerm, rf.commitIndex)
+		DPrintf("server %d in term %d commitIndex updated: %d\n", rf.me, rf.currentTerm, rf.commitIndex)
 
-	if rf.commitIndex > rf.lastApplied {
-		rf.lastApplied = rf.commitIndex
+		// apply logs
+		DPrintf("server %d term %d lastApplied: %d, commitIndex: %d\n", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
+		if rf.commitIndex > rf.lastApplied {
+			go rf.sendApplyMsg(rf.log[rf.lastApplied+1 : rf.commitIndex+1], rf.currentTerm)
+			rf.lastApplied = rf.commitIndex
+		}
 	}
 	reply.Success = true
+	DPrintf("server %d term %d after handling AppendEntries, logs: %v\n", rf.me, rf.currentTerm, rf.log[1:])
+}
+
+func (rf *Raft) sendApplyMsg(entries []LogEntry, term int) {
+	DPrintf("server %d term %d apply log entries [%d, %d]\n", rf.me, term, entries[0].Index, entries[len(entries)-1].Index)
+	for _, entry := range entries {
+		applyMsg := ApplyMsg{
+			CommandValid: true,
+			Command:      entry.Command,
+			CommandIndex: entry.Index,
+		}
+		rf.applyCh <- applyMsg
+	}
 }
 
 //
@@ -337,14 +357,24 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return -1, term, isLeader
 	}
 
+	// if command is already appended, return
+	for i := len(rf.log) - 1; i > 0; i-- {
+		if rf.log[i].Command == command {
+			index = i
+			return index, term, isLeader
+		}
+	}
+
 	// create log entry
+	index = len(rf.log)
 	entry := LogEntry{
 		Command: command,
 		Term:    rf.currentTerm,
+		Index:   index,
 	}
-	index = len(rf.log)
 	rf.log = append(rf.log, entry)
-	rf.lastApplied = index
+	DPrintf("leader %d term %d append new command from client %+v\n", rf.me, rf.currentTerm, entry)
+	rf.matchIndex[rf.me] = index
 
 	return index, term, isLeader
 }
@@ -398,9 +428,9 @@ func (rf *Raft) startElection() {
 			mu.Lock()
 			if voteGranted {
 				votesRcvd++
-				DPrintf("😊candidate %d got vote from server %d in term %d, %d votes received\n", rf.me, server, candidateTerm, votesRcvd)
+				//DPrintf("😊candidate %d got vote from server %d in term %d, %d votes received\n", rf.me, server, candidateTerm, votesRcvd)
 			} else {
-				DPrintf("😭candidate %d didn't got vote from server %d in term %d, the reason could be either the network loss or the voter didn't recognize the candidate. %d votes received\n", rf.me, server, candidateTerm, votesRcvd)
+				//DPrintf("😭candidate %d didn't got vote from server %d in term %d, the reason could be either the network loss or the voter didn't recognize the candidate. %d votes received\n", rf.me, server, candidateTerm, votesRcvd)
 			}
 			finished++
 			mu.Unlock()
@@ -486,24 +516,26 @@ func (rf *Raft) callAppendEntries(server, leaderTerm int, cond *sync.Cond) bool 
 			rf.mu.Unlock()
 			return false
 		}
+
+		DPrintf("leader %d term %d send AppendEntries RPC to server %d, log: %v\n", rf.me, leaderTerm, server, rf.log[1:])
 		// prepare arguments
-		args := &AppendEntriesArgs{
-			Term:         leaderTerm,
-			LeaderId:     rf.me,
-			PrevLogIndex: 0,
-			PrevLogTerm:  0,
-			Entries:      nil,
-			LeaderCommit: rf.commitIndex,
-		}
 		lastLogIndex := len(rf.log) - 1     // lastLogIndex of leader
 		nextIndex := rf.nextIndex[server]   // nextIndex of follower
 		prevLogIndex := nextIndex - 1       // prevLogIndex immediately preceding new log entries
 		matchIndex := rf.matchIndex[server] // matchIndex of follower, for future double check
+		args := &AppendEntriesArgs{
+			Term:         leaderTerm,
+			LeaderId:     rf.me,
+			PrevLogIndex: prevLogIndex,
+			PrevLogTerm:  rf.log[prevLogIndex].Term,
+			Entries:      nil,
+			LeaderCommit: rf.commitIndex,
+		}
 		if lastLogIndex >= nextIndex {      // leader has new log entries for follower
-			args.PrevLogIndex = prevLogIndex
-			args.PrevLogTerm = rf.log[prevLogIndex].Term
 			args.Entries = rf.log[nextIndex : lastLogIndex+1]
 		}
+		DPrintf("leader %d term %d send AppendEntries RPC to server %d, args: %+v\n", rf.me, leaderTerm, server, args)
+
 		rf.mu.Unlock()
 		reply := &AppendEntriesReply{}
 
@@ -529,7 +561,7 @@ func (rf *Raft) callAppendEntries(server, leaderTerm int, cond *sync.Cond) bool 
 			return false
 		}
 		if reply.Success {
-			DPrintf("leader %d of term %d got success reply from server %d\n, update nextIndex and matchIndex if needed", rf.me, leaderTerm, server)
+			DPrintf("leader %d of term %d got success reply from server %d, update nextIndex and matchIndex if needed", rf.me, leaderTerm, server)
 			if rf.nextIndex[server] == nextIndex { // double check, make sure nextIndex[server] hasn't changed
 				rf.nextIndex[server] = lastLogIndex + 1
 			}
@@ -591,13 +623,13 @@ func (rf *Raft) becomeLeader() {
 func (rf *Raft) broadCastPeriodically() {
 	rf.mu.Lock()
 	leaderTerm := rf.currentTerm
+	N := rf.commitIndex + 1 // for commit check
 	rf.mu.Unlock()
 	DPrintf("leader %d in term %d start broadCast heartbeats to all servers\n", rf.me, leaderTerm)
 	var done int32 = 0 // new leader emerges
 	// commitIndex watcher
 	cond := sync.NewCond(&rf.mu) // condition variable
 	go func() {
-		N := rf.commitIndex + 1
 		for !rf.killed() {
 			rf.mu.Lock()
 			if rf.currentTerm != leaderTerm {
@@ -609,6 +641,12 @@ func (rf *Raft) broadCastPeriodically() {
 			}
 			rf.commitIndex = N
 			DPrintf("leader %d of term %d commitIndex updated: %d\n", rf.me, leaderTerm, N)
+
+			DPrintf("leader %d of term %d lastApplied: %d, commitIndex :%d\n", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
+			go rf.sendApplyMsg(rf.log[rf.lastApplied+1 : rf.commitIndex+1], leaderTerm)
+			if rf.commitIndex > rf.lastApplied {
+				rf.lastApplied = rf.commitIndex
+			}
 			rf.mu.Unlock()
 			N++
 		}
@@ -675,6 +713,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedFor = -1
 	rf.log = make([]LogEntry, 1)
 	rf.resetTimeout = make(chan struct{})
+	rf.applyCh = applyCh
 
 	DPrintf("server %d term %d initialized\n", rf.me, rf.currentTerm)
 
@@ -713,4 +752,5 @@ func init() {
 	rand.Seed(time.Now().UnixNano())
 	logFile, _ := os.Create("log" + time.Now().String())
 	log.SetOutput(logFile)
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 }
