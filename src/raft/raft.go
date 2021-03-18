@@ -274,7 +274,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// apply logs
 		DPrintf("server %d term %d lastApplied: %d, commitIndex: %d\n", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
 		if rf.commitIndex > rf.lastApplied {
-			go rf.sendApplyMsg(rf.log[rf.lastApplied+1 : rf.commitIndex+1], rf.currentTerm)
+			go rf.sendApplyMsg(rf.log[rf.lastApplied+1:rf.commitIndex+1], rf.currentTerm)
 			rf.lastApplied = rf.commitIndex
 		}
 	}
@@ -358,12 +358,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 
 	// if command is already appended, return
-	for i := len(rf.log) - 1; i > 0; i-- {
-		if rf.log[i].Command == command {
-			index = i
-			return index, term, isLeader
-		}
-	}
+	//for i := len(rf.log) - 1; i > 0; i-- {
+	//	if rf.log[i].Command == command {
+	//		index = i
+	//		return index, term, isLeader
+	//	}
+	//}
 
 	// create log entry
 	index = len(rf.log)
@@ -531,7 +531,7 @@ func (rf *Raft) callAppendEntries(server, leaderTerm int, cond *sync.Cond) bool 
 			Entries:      nil,
 			LeaderCommit: rf.commitIndex,
 		}
-		if lastLogIndex >= nextIndex {      // leader has new log entries for follower
+		if lastLogIndex >= nextIndex { // leader has new log entries for follower
 			args.Entries = rf.log[nextIndex : lastLogIndex+1]
 		}
 		DPrintf("leader %d term %d send AppendEntries RPC to server %d, args: %+v\n", rf.me, leaderTerm, server, args)
@@ -564,9 +564,11 @@ func (rf *Raft) callAppendEntries(server, leaderTerm int, cond *sync.Cond) bool 
 			DPrintf("leader %d of term %d got success reply from server %d, update nextIndex and matchIndex if needed", rf.me, leaderTerm, server)
 			if rf.nextIndex[server] == nextIndex { // double check, make sure nextIndex[server] hasn't changed
 				rf.nextIndex[server] = lastLogIndex + 1
+				DPrintf("leader %d of term %d update nextIndex[%d]: %d\n", rf.me, leaderTerm, server, rf.nextIndex[server])
 			}
 			if rf.matchIndex[server] == matchIndex { // double check
 				rf.matchIndex[server] = lastLogIndex
+				DPrintf("leader %d of term %d update matchIndex[%d]: %d\n", rf.me, leaderTerm, server, rf.matchIndex[server])
 			}
 			cond.Broadcast()
 			rf.mu.Unlock()
@@ -627,14 +629,20 @@ func (rf *Raft) broadCastPeriodically() {
 	rf.mu.Unlock()
 	DPrintf("leader %d in term %d start broadCast heartbeats to all servers\n", rf.me, leaderTerm)
 	var done int32 = 0 // new leader emerges
-	// commitIndex watcher
+
+	// commitIndex update watcher
 	cond := sync.NewCond(&rf.mu) // condition variable
 	go func() {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
 		for !rf.killed() {
-			rf.mu.Lock()
 			if rf.currentTerm != leaderTerm {
-				rf.mu.Unlock()
 				return
+			}
+			if N < len(rf.log) && rf.log[N].Term != leaderTerm {
+				// important! only wait when log[N].Term is current term!
+				N++
+				continue
 			}
 			for !rf.majorityCheck(N) {
 				cond.Wait()
@@ -642,12 +650,11 @@ func (rf *Raft) broadCastPeriodically() {
 			rf.commitIndex = N
 			DPrintf("leader %d of term %d commitIndex updated: %d\n", rf.me, leaderTerm, N)
 
-			DPrintf("leader %d of term %d lastApplied: %d, commitIndex :%d\n", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
-			go rf.sendApplyMsg(rf.log[rf.lastApplied+1 : rf.commitIndex+1], leaderTerm)
+			//DPrintf("leader %d of term %d lastApplied: %d, commitIndex :%d\n", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
+			go rf.sendApplyMsg(rf.log[rf.lastApplied+1:rf.commitIndex+1], leaderTerm)
 			if rf.commitIndex > rf.lastApplied {
 				rf.lastApplied = rf.commitIndex
 			}
-			rf.mu.Unlock()
 			N++
 		}
 	}()
@@ -678,7 +685,7 @@ func (rf *Raft) broadCastPeriodically() {
 }
 
 func (rf *Raft) majorityCheck(N int) bool {
-	if N >= len(rf.log) || rf.log[N].Term != rf.currentTerm {
+	if N >= len(rf.log) || rf.log[N].Term != rf.currentTerm { // 无法提交上一个term的log entry
 		return false
 	}
 	count := 0
@@ -750,7 +757,7 @@ func genTimeout() time.Duration {
 
 func init() {
 	rand.Seed(time.Now().UnixNano())
-	logFile, _ := os.Create("log" + time.Now().String())
+	logFile, _ := os.Create("log" + time.Now().Format("2006-01-02 15:04:05"))
 	log.SetOutput(logFile)
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 }
