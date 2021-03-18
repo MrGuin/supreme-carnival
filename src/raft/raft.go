@@ -178,7 +178,7 @@ type RequestVoteReply struct {
 //
 // example RequestVote RPC handler.
 //
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -226,7 +226,7 @@ type AppendEntriesReply struct {
 	Success bool // consistency check passed
 }
 
-func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	DPrintf("server %d handling AppendEntries from server %d of term %d\n", rf.me, args.LeaderId, args.Term)
@@ -258,7 +258,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			entryIndex++
 		}
 		rf.log = rf.log[:conflictIndex]
-		rf.log = append(rf.log, args.Entries[entryIndex:]...)
+		//entries := make([]LogEntry, len(args.Entries))
+		//fmt.Printf("%#v\n", args.Entries)
+		//copy(entries, args.Entries)	// 直接操作args.Entries[entryIndex:]会data race，不知道为什么
+		//rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
+		for entryIndex < len(args.Entries) {
+			rf.log = append(rf.log, args.Entries[entryIndex])
+			entryIndex++
+		}
+
 		DPrintf("server %d in term %d append new entries: [%d, %d]\n", rf.me, rf.currentTerm, conflictIndex, len(rf.log)-1)
 	}
 	if args.LeaderCommit > rf.commitIndex { // AppendEntries RPC no.5
@@ -467,7 +475,7 @@ func (rf *Raft) callRequestVote(server, candidateTerm int) bool {
 	// prepare arguments
 	rf.mu.Lock()
 	lastLogIndex := len(rf.log) - 1
-	args := &RequestVoteArgs{
+	args := RequestVoteArgs{
 		Term:         candidateTerm,
 		CandidateId:  rf.me,
 		LastLogIndex: lastLogIndex,
@@ -523,7 +531,7 @@ func (rf *Raft) callAppendEntries(server, leaderTerm int, cond *sync.Cond) bool 
 		nextIndex := rf.nextIndex[server]   // nextIndex of follower
 		prevLogIndex := nextIndex - 1       // prevLogIndex immediately preceding new log entries
 		matchIndex := rf.matchIndex[server] // matchIndex of follower, for future double check
-		args := &AppendEntriesArgs{
+		args := AppendEntriesArgs{
 			Term:         leaderTerm,
 			LeaderId:     rf.me,
 			PrevLogIndex: prevLogIndex,
