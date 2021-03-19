@@ -97,7 +97,7 @@ type Raft struct {
 
 	// channel to reset election timeout,
 	// which should be sent through only by the two RPC handler.
-	resetTimeout chan struct{}
+	resetTimeoutCh chan struct{}
 }
 
 // return currentTerm and whether this server
@@ -202,7 +202,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
-		rf.resetTimeout <- struct{}{}
+		rf.resetTimeout()
 		DPrintf("server %d granted vote to candidate %d in term %d\n", rf.me, args.CandidateId, args.Term)
 	} else {
 		DPrintf("server %d denied vote to candidate %d in term %d\n", rf.me, args.CandidateId, args.Term)
@@ -239,7 +239,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	} else if args.Term > rf.currentTerm { // request from a new leader, update currentTerm
 		rf.becomeFollower(args.Term)
 	}
-	rf.resetTimeout <- struct{}{} // reset election timeout
+	rf.resetTimeout() // reset election timeout
 
 	if args.PrevLogIndex >= len(rf.log) ||
 		rf.log[args.PrevLogIndex].Term != args.PrevLogTerm { // consistency check
@@ -298,6 +298,10 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 // notify applier to apply committed entries.
 func (rf *Raft) notifyApply() {
 	rf.applyCond.Broadcast()
+}
+
+func (rf *Raft) resetTimeout() {
+	rf.resetTimeoutCh <- struct{}{}
 }
 
 func (rf *Raft) sendApplyMsg(entries []LogEntry, term int) {
@@ -742,7 +746,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = follower
 	rf.votedFor = -1
 	rf.log = make([]LogEntry, 1)
-	rf.resetTimeout = make(chan struct{})
+	rf.resetTimeoutCh = make(chan struct{})
 	rf.applyCh = applyCh
 	rf.applyCond = sync.NewCond(&rf.mu)
 
@@ -760,7 +764,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				if !isLeader {
 					rf.becomeCandidate()
 				}
-			case <-rf.resetTimeout:
+			case <-rf.resetTimeoutCh:
 				DPrintf("server %d election timeout reset\n", rf.me)
 				continue
 			}
