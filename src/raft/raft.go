@@ -87,6 +87,7 @@ type Raft struct {
 	// Volatile states on all servers.
 	commitIndex int
 	lastApplied int
+	applyCond   *sync.Cond // condition variable to wait on commitIndex and apply log entries
 
 	applyCh chan ApplyMsg
 
@@ -230,7 +231,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	DPrintf("server %d handling AppendEntries from server %d of term %d\n", rf.me, args.LeaderId, args.Term)
-	DPrintf("server %d term %d before handling AppendEntries, logs: %v\n", rf.me, rf.currentTerm, rf.log[1:])
+	//DPrintf("server %d term %d before handling AppendEntries, logs: %v\n", rf.me, rf.currentTerm, rf.log[1:])
 	reply.Term = rf.currentTerm     // set term for leader to update itself
 	if args.Term < rf.currentTerm { // request from outdated leader
 		reply.Success = false
@@ -257,15 +258,18 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 			conflictIndex++
 			entryIndex++
 		}
-		rf.log = rf.log[:conflictIndex]
+		if entryIndex < len(args.Entries) { // still entries left in args
+			rf.log = rf.log[:conflictIndex]
+			rf.log = append(rf.log, args.Entries[entryIndex:]...)
+		}
 		//entries := make([]LogEntry, len(args.Entries))
 		//fmt.Printf("%#v\n", args.Entries)
 		//copy(entries, args.Entries)	// 直接操作args.Entries[entryIndex:]会data race，不知道为什么
 		//rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
-		for entryIndex < len(args.Entries) {
-			rf.log = append(rf.log, args.Entries[entryIndex])
-			entryIndex++
-		}
+		//for entryIndex < len(args.Entries) {
+		//	rf.log = append(rf.log, args.Entries[entryIndex])
+		//	entryIndex++
+		//}
 
 		DPrintf("server %d in term %d append new entries: [%d, %d]\n", rf.me, rf.currentTerm, conflictIndex, len(rf.log)-1)
 	}
@@ -280,14 +284,20 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		DPrintf("server %d in term %d commitIndex updated: %d\n", rf.me, rf.currentTerm, rf.commitIndex)
 
 		// apply logs
-		DPrintf("server %d term %d lastApplied: %d, commitIndex: %d\n", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
-		if rf.commitIndex > rf.lastApplied {
-			go rf.sendApplyMsg(rf.log[rf.lastApplied+1:rf.commitIndex+1], rf.currentTerm)
-			rf.lastApplied = rf.commitIndex
-		}
+		rf.notifyApply()
+		//DPrintf("server %d term %d lastApplied: %d, commitIndex: %d\n", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
+		//if rf.commitIndex > rf.lastApplied {
+		//	go rf.sendApplyMsg(rf.log[rf.lastApplied+1:rf.commitIndex+1], rf.currentTerm)
+		//	rf.lastApplied = rf.commitIndex
+		//}
 	}
 	reply.Success = true
 	DPrintf("server %d term %d after handling AppendEntries, logs: %v\n", rf.me, rf.currentTerm, rf.log[1:])
+}
+
+// notify applier to apply committed entries.
+func (rf *Raft) notifyApply() {
+	rf.applyCond.Broadcast()
 }
 
 func (rf *Raft) sendApplyMsg(entries []LogEntry, term int) {
@@ -381,7 +391,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Index:   index,
 	}
 	rf.log = append(rf.log, entry)
-	DPrintf("leader %d term %d append new command from client %+v\n", rf.me, rf.currentTerm, entry)
+	//DPrintf("leader %d term %d append new command from client %+v\n", rf.me, rf.currentTerm, entry)
 	rf.matchIndex[rf.me] = index
 
 	return index, term, isLeader
@@ -542,7 +552,7 @@ func (rf *Raft) callAppendEntries(server, leaderTerm int, cond *sync.Cond) bool 
 		if lastLogIndex >= nextIndex { // leader has new log entries for follower
 			entries := rf.log[nextIndex : lastLogIndex+1]
 			args.Entries = make([]LogEntry, len(entries))
-			copy(args.Entries, entries)		// important! make a copy, instead of using log directly!
+			copy(args.Entries, entries) // important! make a copy, instead of using log directly!
 			//args.Entries = rf.log[nextIndex : lastLogIndex+1]
 		}
 		DPrintf("leader %d term %d send AppendEntries RPC to server %d, args: %+v\n", rf.me, leaderTerm, server, args)
@@ -661,11 +671,13 @@ func (rf *Raft) broadCastPeriodically() {
 			rf.commitIndex = N
 			DPrintf("leader %d of term %d commitIndex updated: %d\n", rf.me, leaderTerm, N)
 
-			//DPrintf("leader %d of term %d lastApplied: %d, commitIndex :%d\n", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
-			go rf.sendApplyMsg(rf.log[rf.lastApplied+1:rf.commitIndex+1], leaderTerm)
-			if rf.commitIndex > rf.lastApplied {
-				rf.lastApplied = rf.commitIndex
-			}
+			DPrintf("leader %d of term %d lastApplied: %d, commitIndex :%d\n", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
+
+			rf.notifyApply()
+			//if rf.commitIndex > rf.lastApplied {
+			//	go rf.sendApplyMsg(rf.log[rf.lastApplied+1:rf.commitIndex+1], leaderTerm)
+			//	rf.lastApplied = rf.commitIndex
+			//}
 			N++
 		}
 	}()
@@ -732,6 +744,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.log = make([]LogEntry, 1)
 	rf.resetTimeout = make(chan struct{})
 	rf.applyCh = applyCh
+	rf.applyCond = sync.NewCond(&rf.mu)
 
 	DPrintf("server %d term %d initialized\n", rf.me, rf.currentTerm)
 
@@ -751,6 +764,27 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				DPrintf("server %d election timeout reset\n", rf.me)
 				continue
 			}
+		}
+	}()
+
+	// goroutine to apply log entries on commitIndex update
+	go func() {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		for !rf.killed() {
+			for rf.commitIndex <= rf.lastApplied {
+				rf.applyCond.Wait()
+			}
+			for i := rf.lastApplied; i <= rf.commitIndex; i++ {
+				aplMsg := ApplyMsg{
+					CommandValid: true,
+					Command:      rf.log[i].Command,
+					CommandIndex: i,
+				}
+				rf.applyCh <- aplMsg
+				DPrintf("server %d term %d apply log entry: [%d]\n", rf.me, rf.currentTerm, i)
+			}
+			rf.lastApplied = rf.commitIndex
 		}
 	}()
 
