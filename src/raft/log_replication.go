@@ -58,34 +58,19 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 			rf.log = rf.log[:conflictIndex]
 			rf.log = append(rf.log, args.Entries[entryIndex:]...)
 		}
-		//entries := make([]LogEntry, len(args.Entries))
-		//fmt.Printf("%#v\n", args.Entries)
-		//copy(entries, args.Entries)	// 直接操作args.Entries[entryIndex:]会data race，不知道为什么
-		//rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
-		//for entryIndex < len(args.Entries) {
-		//	rf.log = append(rf.log, args.Entries[entryIndex])
-		//	entryIndex++
-		//}
-
 		DPrintf("server %d in term %d append new entries: [%d, %d]\n", rf.me, rf.currentTerm, conflictIndex, len(rf.log)-1)
 	}
 	if args.LeaderCommit > rf.commitIndex { // AppendEntries RPC no.5
-		//lastCommitIndex := rf.commitIndex
-		lastLogIndex := len(rf.log) - 1
-		if args.LeaderCommit < lastLogIndex {
-			rf.commitIndex = args.LeaderCommit
-		} else {
-			rf.commitIndex = lastLogIndex
+		newCommitIndex := args.LeaderCommit
+		if len(args.Entries) > 0 && args.Entries[len(args.Entries)-1].Index < args.LeaderCommit {
+			newCommitIndex = args.Entries[len(args.Entries)-1].Index
 		}
+		rf.commitIndex = newCommitIndex
 		DPrintf("server %d in term %d commitIndex updated: %d\n", rf.me, rf.currentTerm, rf.commitIndex)
 
 		// apply logs
 		rf.notifyApply()
 		//DPrintf("server %d term %d lastApplied: %d, commitIndex: %d\n", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
-		//if rf.commitIndex > rf.lastApplied {
-		//	go rf.sendApplyMsg(rf.log[rf.lastApplied+1:rf.commitIndex+1], rf.currentTerm)
-		//	rf.lastApplied = rf.commitIndex
-		//}
 	}
 	reply.Success = true
 	DPrintf("server %d term %d after handling AppendEntries, logs: %v\n", rf.me, rf.currentTerm, rf.log[1:])
