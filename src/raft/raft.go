@@ -540,7 +540,10 @@ func (rf *Raft) callAppendEntries(server, leaderTerm int, cond *sync.Cond) bool 
 			LeaderCommit: rf.commitIndex,
 		}
 		if lastLogIndex >= nextIndex { // leader has new log entries for follower
-			args.Entries = rf.log[nextIndex : lastLogIndex+1]
+			entries := rf.log[nextIndex : lastLogIndex+1]
+			args.Entries = make([]LogEntry, len(entries))
+			copy(args.Entries, entries)		// important! make a copy, instead of using log directly!
+			//args.Entries = rf.log[nextIndex : lastLogIndex+1]
 		}
 		DPrintf("leader %d term %d send AppendEntries RPC to server %d, args: %+v\n", rf.me, leaderTerm, server, args)
 
