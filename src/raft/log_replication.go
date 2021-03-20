@@ -26,7 +26,7 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	DPrintf("server %d handling AppendEntries from server %d of term %d\n", rf.me, args.LeaderId, args.Term)
+	DPrintf("server %d current term %d start handling AppendEntries from leader %d of term %d\n", rf.me, rf.currentTerm, args.LeaderId, args.Term)
 	//DPrintf("server %d term %d before handling AppendEntries, logs: %v\n", rf.me, rf.currentTerm, rf.log[1:])
 	reply.Term = rf.currentTerm     // set term for leader to update itself
 	if args.Term < rf.currentTerm { // request from outdated leader
@@ -39,13 +39,12 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 	if args.PrevLogIndex >= len(rf.log) ||
 		rf.log[args.PrevLogIndex].Term != args.PrevLogTerm { // consistency check
-		//fmt.Printf("server %d consistency check failed\n", rf.me)
 		reply.Success = false
+		//fmt.Printf("server %d consistency check failed\n", rf.me)
 		return
 	}
 	if len(args.Entries) > 0 { // new entries to append
-		// find first conflict entry index
-		conflictIndex := args.PrevLogIndex + 1
+		conflictIndex := args.PrevLogIndex + 1	// find first conflicting entry index
 		entryIndex := 0
 		for conflictIndex < len(rf.log) && entryIndex < len(args.Entries) {
 			if rf.log[conflictIndex].Term != args.Entries[entryIndex].Term {
@@ -57,8 +56,8 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		if entryIndex < len(args.Entries) { // still entries left in args
 			rf.log = rf.log[:conflictIndex]
 			rf.log = append(rf.log, args.Entries[entryIndex:]...)
+			DPrintf("server %d in term %d append new entries: [%d, %d]\n", rf.me, rf.currentTerm, conflictIndex, len(rf.log)-1)
 		}
-		DPrintf("server %d in term %d append new entries: [%d, %d]\n", rf.me, rf.currentTerm, conflictIndex, len(rf.log)-1)
 	}
 	if args.LeaderCommit > rf.commitIndex { // AppendEntries RPC no.5
 		newCommitIndex := args.LeaderCommit
@@ -67,24 +66,22 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		}
 		rf.commitIndex = newCommitIndex
 		DPrintf("server %d in term %d commitIndex updated: %d\n", rf.me, rf.currentTerm, rf.commitIndex)
-
-		// apply logs
-		rf.notifyApply()
+		rf.notifyApply() // notify apply logs
 		//DPrintf("server %d term %d lastApplied: %d, commitIndex: %d\n", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
 	}
 	reply.Success = true
-	DPrintf("server %d term %d after handling AppendEntries, logs: %v\n", rf.me, rf.currentTerm, rf.log[1:])
+	//DPrintf("server %d current term %d finish handling AppendEntries from leader %d of term %d, logs: %v\n", rf.me, rf.currentTerm, args.LeaderId, args.Term, rf.log[1:])
 }
 
 // send AppendEntries RPC to server.
 // return true if no new leader occurs, including reply lost.
 // return false only when a new leader occurs.
 func (rf *Raft) callAppendEntries(server, leaderTerm int, cond *sync.Cond) bool {
-	DPrintf("leader %d of term %d keep sending AppendEntries RPC to server %d until getting a reply\n", rf.me, leaderTerm, server)
-	defer DPrintf("leader %d of term %d callAppendEntries to server %d returns\n", rf.me, leaderTerm, server)
+	//DPrintf("leader %d of term %d keep sending AppendEntries RPC to server %d until getting a reply\n", rf.me, leaderTerm, server)
+	//defer DPrintf("leader %d of term %d callAppendEntries to server %d returns\n", rf.me, leaderTerm, server)
 	for !rf.killed() {
 		rf.mu.Lock()
-		if rf.currentTerm != leaderTerm { // term changed, return
+		if rf.currentTerm != leaderTerm { // term check
 			rf.mu.Unlock()
 			return false
 		}
@@ -137,7 +134,7 @@ func (rf *Raft) callAppendEntries(server, leaderTerm int, cond *sync.Cond) bool 
 		}
 		if reply.Success {
 			DPrintf("leader %d of term %d got success reply from server %d, update nextIndex and matchIndex if needed", rf.me, leaderTerm, server)
-			if rf.nextIndex[server] == nextIndex { // double check, make sure nextIndex[server] hasn't changed
+			if rf.nextIndex[server] == nextIndex { // double check, in case nextIndex[server] has changed
 				rf.nextIndex[server] = lastLogIndex + 1
 				DPrintf("leader %d of term %d update nextIndex[%d]: %d\n", rf.me, leaderTerm, server, rf.nextIndex[server])
 			}
@@ -145,7 +142,7 @@ func (rf *Raft) callAppendEntries(server, leaderTerm int, cond *sync.Cond) bool 
 				rf.matchIndex[server] = lastLogIndex
 				DPrintf("leader %d of term %d update matchIndex[%d]: %d\n", rf.me, leaderTerm, server, rf.matchIndex[server])
 			}
-			cond.Broadcast()
+			cond.Broadcast()	// wake up committer goroutine
 			rf.mu.Unlock()
 			return true
 		} else { // consistency check failed, decrement nextIndex and retry immediately
