@@ -102,7 +102,7 @@ func (rf *Raft) callAppendEntries(server, leaderTerm int, cond *sync.Cond) bool 
 			return false
 		}
 
-		DPrintf("leader %d term %d send AppendEntries RPC to server %d, log: %v\n", rf.me, leaderTerm, server, rf.log[1:])
+		// DPrintf("leader %d term %d send AppendEntries RPC to server %d, log: %+v\n", rf.me, leaderTerm, server, rf.log[1:])
 		// prepare arguments
 		lastLogIndex := len(rf.log) - 1     // lastLogIndex of leader
 		nextIndex := rf.nextIndex[server]   // nextIndex of follower
