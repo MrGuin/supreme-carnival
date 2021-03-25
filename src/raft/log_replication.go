@@ -18,8 +18,10 @@ type AppendEntriesArgs struct {
 
 // AppendEntries RPC reply structure
 type AppendEntriesReply struct {
-	Term    int  // currentTerm, for leader to updaate itself
-	Success bool // consistency check passed
+	Term                      int  // currentTerm, for leader to updaate itself
+	Success                   bool // consistency check passed
+	ConflictingTerm           int  // term of conflicting entry
+	ConflictingTermFirstIndex int  // first index server stores for ConflictingTerm
 }
 
 // AppendEntries RPC.
@@ -39,12 +41,24 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 	if args.PrevLogIndex >= len(rf.log) ||
 		rf.log[args.PrevLogIndex].Term != args.PrevLogTerm { // consistency check
+		conflictTerm := args.PrevLogTerm
+		firstIndex := len(rf.log) // first index of conflicting term entries
+		if args.PrevLogIndex < len(rf.log) {
+			firstIndex = args.PrevLogIndex
+		}
+		for firstIndex > 1 && rf.log[firstIndex-1].Term == conflictTerm {
+			firstIndex--
+		}
+
 		reply.Success = false
+		reply.ConflictingTerm = conflictTerm
+		reply.ConflictingTermFirstIndex = firstIndex
+
 		//fmt.Printf("server %d consistency check failed\n", rf.me)
 		return
 	}
 	if len(args.Entries) > 0 { // new entries to append
-		conflictIndex := args.PrevLogIndex + 1	// find first conflicting entry index
+		conflictIndex := args.PrevLogIndex + 1 // find first conflicting entry index
 		entryIndex := 0
 		for conflictIndex < len(rf.log) && entryIndex < len(args.Entries) {
 			if rf.log[conflictIndex].Term != args.Entries[entryIndex].Term {
@@ -79,7 +93,9 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 func (rf *Raft) callAppendEntries(server, leaderTerm int, cond *sync.Cond) bool {
 	//DPrintf("leader %d of term %d keep sending AppendEntries RPC to server %d until getting a reply\n", rf.me, leaderTerm, server)
 	//defer DPrintf("leader %d of term %d callAppendEntries to server %d returns\n", rf.me, leaderTerm, server)
+	retryCount := 0
 	for !rf.killed() {
+		// DPrintf("callAppendEntries retry count: %d\n", retryCount)
 		rf.mu.Lock()
 		if rf.currentTerm != leaderTerm { // term check
 			rf.mu.Unlock()
@@ -142,14 +158,21 @@ func (rf *Raft) callAppendEntries(server, leaderTerm int, cond *sync.Cond) bool 
 				rf.matchIndex[server] = lastLogIndex
 				DPrintf("leader %d of term %d update matchIndex[%d]: %d\n", rf.me, leaderTerm, server, rf.matchIndex[server])
 			}
-			cond.Broadcast()	// wake up committer goroutine
+			cond.Broadcast() // wake up committer goroutine
 			rf.mu.Unlock()
 			return true
 		} else { // consistency check failed, decrement nextIndex and retry immediately
 			DPrintf("leader %d of term %d: server %d consistency check failed, decrement nextIndex[server] and retry immediately\n", rf.me, leaderTerm, server)
-			rf.nextIndex[server]--
+			nextIndex := reply.ConflictingTermFirstIndex
+			for nextIndex > 1 && rf.log[nextIndex-1].Term == reply.ConflictingTerm { // skip conflicting term
+				nextIndex--
+			}
+			rf.nextIndex[server] = nextIndex
+			// rf.nextIndex[server]--
 			rf.mu.Unlock()
 		}
+		// DPrintf("AppendEntries try %d\n", i)
+		retryCount++
 	}
 	return false
 }
