@@ -311,8 +311,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 					Command:      rf.log[i].Command,
 					CommandIndex: i,
 				}
+				rf.mu.Unlock() // release the lock since sending might block
 				rf.applyCh <- aplMsg
 				DPrintf("server %d term %d apply log entry: [%d]\n", rf.me, rf.currentTerm, i)
+				rf.mu.Lock()
 			}
 			rf.lastApplied = rf.commitIndex // update lastApplied after every commitment
 		}
