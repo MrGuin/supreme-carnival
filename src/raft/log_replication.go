@@ -6,6 +6,7 @@ import (
 	"time"
 )
 
+// AppendEntriesArgs
 // AppendEntries RPC arguments structure
 type AppendEntriesArgs struct {
 	Term         int        // leader's term
@@ -16,6 +17,7 @@ type AppendEntriesArgs struct {
 	LeaderCommit int        // leader's commitIndex
 }
 
+// AppendEntriesReply
 // AppendEntries RPC reply structure
 type AppendEntriesReply struct {
 	Term                      int  // currentTerm, for leader to updaate itself
@@ -158,7 +160,9 @@ func (rf *Raft) callAppendEntries(server, leaderTerm int, cond *sync.Cond) bool 
 				rf.matchIndex[server] = lastLogIndex
 				DPrintf("leader %d of term %d update matchIndex[%d]: %d\n", rf.me, leaderTerm, server, rf.matchIndex[server])
 			}
-			cond.Broadcast() // wake up committer goroutine
+			if cond != nil {
+				cond.Broadcast() // wake up committer goroutine
+			}
 			rf.mu.Unlock()
 			return true
 		} else { // consistency check failed, decrement nextIndex and retry immediately
@@ -209,10 +213,6 @@ func (rf *Raft) broadCastPeriodically() {
 			DPrintf("leader %d of term %d lastApplied: %d, commitIndex :%d\n", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
 
 			rf.notifyApply()
-			//if rf.commitIndex > rf.lastApplied {
-			//	go rf.sendApplyMsg(rf.log[rf.lastApplied+1:rf.commitIndex+1], leaderTerm)
-			//	rf.lastApplied = rf.commitIndex
-			//}
 			N++
 		}
 	}()
@@ -242,13 +242,25 @@ func (rf *Raft) broadCastPeriodically() {
 	}
 }
 
+// broadcastAppendEntriesImmediately is called when client calls start() and provides a new command.
+// assuming lock held.
+func (rf *Raft) broadcastAppendEntriesImmediately()  {
+	leaderTerm := rf.currentTerm
+	for pr := range rf.peers {
+		if pr == rf.me {
+			continue
+		}
+		go rf.callAppendEntries(pr, leaderTerm, nil)
+	}
+}
+
 // check if log entries before(including) index N is replicated on majority of the cluster.
 func (rf *Raft) majorityCheck(N int) bool {
 	if N >= len(rf.log) || rf.log[N].Term != rf.currentTerm { // entry of last term, return
 		return false
 	}
 	count := 0
-	for pr, _ := range rf.peers {
+	for pr := range rf.peers {
 		if rf.matchIndex[pr] >= N {
 			count++
 		}

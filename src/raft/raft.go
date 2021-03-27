@@ -18,7 +18,9 @@ package raft
 //
 
 import (
+	"../labgob"
 	"../labrpc"
+	"bytes"
 	"log"
 	"math/rand"
 	"os"
@@ -30,7 +32,7 @@ import (
 // import "bytes"
 // import "../labgob"
 
-//
+// ApplyMsg
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
 // tester) on the same server, via the applyCh passed to Make(). set
@@ -47,10 +49,10 @@ type ApplyMsg struct {
 	CommandIndex int
 }
 
-// server state
+// State server state
 type State string
 
-// logEntry struct
+// LogEntry logEntry struct
 type LogEntry struct {
 	Command interface{} // command for state machine
 	Term    int         // term when entry was received by leader
@@ -63,7 +65,7 @@ const (
 	leader          = "leader"
 )
 
-//
+// Raft
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
@@ -100,7 +102,7 @@ type Raft struct {
 	resetTimeoutCh chan struct{}
 }
 
-// return currentTerm and whether this server
+// GetState return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 
@@ -130,6 +132,19 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	buffer := new(bytes.Buffer)
+	encoder := labgob.NewEncoder(buffer)
+	if err := encoder.Encode(rf.currentTerm); err != nil {
+		log.Fatal(err)
+	}
+	if err := encoder.Encode(rf.votedFor); err != nil {
+		log.Fatal(err)
+	}
+	if err := encoder.Encode(rf.log); err != nil {
+		log.Fatal(err)
+	}
+	data := buffer.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -188,7 +203,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-//
+// Start
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -224,12 +239,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Index:   index,
 	}
 	rf.log = append(rf.log, entry)
+	rf.broadcastAppendEntriesImmediately()
 	//DPrintf("leader %d term %d append new command from client %+v\n", rf.me, rf.currentTerm, entry)
 	rf.matchIndex[rf.me] = index
 	return index, term, isLeader
 }
 
-//
+// Kill
 // the tester doesn't halt goroutines created by Raft after each test,
 // but it does call the Kill() method. your code can use killed() to
 // check whether Kill() has been called. the use of atomic avoids the
@@ -250,7 +266,7 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-//
+// Make
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays

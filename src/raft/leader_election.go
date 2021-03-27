@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-//
+// RequestVoteArgs
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
@@ -19,7 +19,7 @@ type RequestVoteArgs struct {
 	LastLogTerm  int // term of candidate's last log entry
 }
 
-//
+// RequestVoteReply
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 //
@@ -44,12 +44,12 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term > rf.currentTerm {
 		rf.becomeFollower(args.Term)
 	}
-	lastLogIndex := len(rf.log) - 1
-	lastLogTerm := rf.log[lastLogIndex].Term
+	myLastLogIndex := len(rf.log) - 1
+	myLastLogTerm := rf.log[myLastLogIndex].Term
 	// grant vote if server hasn't voted for anyone else and the candidate's log is at least as up-to-date as server's
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
-		(lastLogTerm < args.LastLogTerm ||
-			lastLogTerm == args.LastLogTerm && lastLogIndex <= args.LastLogIndex) {
+		(args.LastLogTerm > myLastLogTerm ||
+			args.LastLogTerm == myLastLogTerm && args.LastLogIndex >= myLastLogIndex) {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
@@ -203,7 +203,7 @@ func (rf *Raft) becomeLeader() {
 	DPrintf("✨candidate %d becomes leader in term %d\n", rf.me, rf.currentTerm)
 	rf.state = leader
 	rf.nextIndex = make([]int, len(rf.peers))
-	for i, _ := range rf.nextIndex {
+	for i := range rf.nextIndex {
 		rf.nextIndex[i] = len(rf.log)
 	}
 	rf.matchIndex = make([]int, len(rf.peers))
