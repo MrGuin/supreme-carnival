@@ -2,7 +2,6 @@ package raft
 
 import (
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -30,16 +29,18 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	DPrintf("server %d current term %d start handling AppendEntries from leader %d of term %d\n", rf.me, rf.currentTerm, args.LeaderId, args.Term)
-	//DPrintf("server %d term %d before handling AppendEntries, logs: %v\n", rf.me, rf.currentTerm, rf.log[1:])
+	DPrintf("server [%d] current term %d start handling AppendEntries from leader %d of term %d\n", rf.me, rf.currentTerm, args.LeaderId, args.Term)
+	//DPrintf("server %d term [%d] before handling AppendEntries, logs: %v\n", rf.me, rf.currentTerm, rf.log[1:])
 	reply.Term = rf.currentTerm     // set term for leader to update itself
 	if args.Term < rf.currentTerm { // request from outdated leader
 		reply.Success = false
 		return
 	} else if args.Term > rf.currentTerm { // request from a new leader, update currentTerm
-		rf.becomeFollower(args.Term)
+		rf.becomeFollowerL(args.Term)
 	}
+	rf.mu.Unlock()
 	rf.resetTimeout() // reset election timeout
+	rf.mu.Lock()
 
 	if args.PrevLogIndex >= len(rf.log) ||
 		rf.log[args.PrevLogIndex].Term != args.PrevLogTerm { // consistency check
@@ -72,7 +73,8 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		if entryIndex < len(args.Entries) { // still entries left in args
 			rf.log = rf.log[:conflictIndex]
 			rf.log = append(rf.log, args.Entries[entryIndex:]...)
-			DPrintf("server %d in term %d append new entries: [%d, %d]\n", rf.me, rf.currentTerm, conflictIndex, len(rf.log)-1)
+			rf.persist()
+			DPrintf("server [%d] in term %d append new entries: [%d, %d]\n", rf.me, rf.currentTerm, conflictIndex, len(rf.log)-1)
 		}
 	}
 	if args.LeaderCommit > rf.commitIndex { // AppendEntries RPC no.5
@@ -81,35 +83,37 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 			newCommitIndex = args.Entries[len(args.Entries)-1].Index
 		}
 		rf.commitIndex = newCommitIndex
-		DPrintf("server %d in term %d commitIndex updated: %d\n", rf.me, rf.currentTerm, rf.commitIndex)
+		DPrintf("server [%d] in term %d commitIndex updated: %d\n", rf.me, rf.currentTerm, rf.commitIndex)
 		rf.notifyApply() // notify apply logs
-		//DPrintf("server %d term %d lastApplied: %d, commitIndex: %d\n", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
+		//DPrintf("server [%d] term %d lastApplied: %d, commitIndex: %d\n", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
 	}
 	reply.Success = true
-	//DPrintf("server %d current term %d finish handling AppendEntries from leader %d of term %d, logs: %v\n", rf.me, rf.currentTerm, args.LeaderId, args.Term, rf.log[1:])
+	//DPrintf("server [%d] current term %d finish handling AppendEntries from leader %d of term %d, logs: %v\n", rf.me, rf.currentTerm, args.LeaderId, args.Term, rf.log[1:])
 }
 
-// send AppendEntries RPC to server.
+// send AppendEntries RPC to server and handle the reply.
 // return true if no new leader occurs, including reply lost.
 // return false only when a new leader occurs.
-func (rf *Raft) callAppendEntries(server, leaderTerm int, cond *sync.Cond) bool {
-	//DPrintf("leader %d of term %d keep sending AppendEntries RPC to server %d until getting a reply\n", rf.me, leaderTerm, server)
-	//defer DPrintf("leader %d of term %d callAppendEntries to server %d returns\n", rf.me, leaderTerm, server)
-	retryCount := 0
+func (rf *Raft) callAppendEntries(server, leaderTerm int, commitCond *sync.Cond) {
+	//DPrintf("leader [%d] of term %d keep sending AppendEntries RPC to server %d until getting a reply\n", rf.me, leaderTerm, server)
+	//defer DPrintf("leader [%d] of term %d callAppendEntries to server %d returns\n", rf.me, leaderTerm, server)
+	//retryCount := 0
+	//rf.mu.Lock()
+	//defer rf.mu.Unlock()
 	for !rf.killed() {
 		// DPrintf("callAppendEntries retry count: %d\n", retryCount)
-		rf.mu.Lock()
-		if rf.currentTerm != leaderTerm { // term check
-			rf.mu.Unlock()
-			return false
+		currentTerm, _ := rf.getCurrentState()
+		if currentTerm != leaderTerm {
+			return
 		}
 
-		// DPrintf("leader %d term %d send AppendEntries RPC to server %d, log: %+v\n", rf.me, leaderTerm, server, rf.log[1:])
+		// DPrintf("leader [%d] term %d send AppendEntries RPC to server %d, log: %+v\n", rf.me, leaderTerm, server, rf.log[1:])
 		// prepare arguments
+		rf.mu.Lock()
 		lastLogIndex := len(rf.log) - 1     // lastLogIndex of leader
-		nextIndex := rf.nextIndex[server]   // nextIndex of follower
-		prevLogIndex := nextIndex - 1       // prevLogIndex immediately preceding new log entries
+		nextIndex := rf.nextIndex[server]   // nextIndex of follower, for future double check
 		matchIndex := rf.matchIndex[server] // matchIndex of follower, for future double check
+		prevLogIndex := nextIndex - 1       // prevLogIndex immediately preceding new log entries
 		args := AppendEntriesArgs{
 			Term:         leaderTerm,
 			LeaderId:     rf.me,
@@ -124,47 +128,44 @@ func (rf *Raft) callAppendEntries(server, leaderTerm int, cond *sync.Cond) bool 
 			copy(args.Entries, entries) // important! make a copy, instead of using log directly!
 			//args.Entries = rf.log[nextIndex : lastLogIndex+1]
 		}
-		DPrintf("leader %d term %d send AppendEntries RPC to server %d, args: %+v\n", rf.me, leaderTerm, server, args)
-
 		rf.mu.Unlock()
 		reply := &AppendEntriesReply{}
 
 		// send AppendEntries RPC
-		ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+		gotReply := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+		DPrintf("leader [%d] term %d send AppendEntries RPC to server %d, args: %+v\n", rf.me, leaderTerm, server, args)
 
 		// process result
-		rf.mu.Lock()
-		//defer rf.mu.Unlock()
-		if rf.currentTerm != leaderTerm { // outdated
-			rf.mu.Unlock()
-			return false
+		currentTerm, _ = rf.getCurrentState()
+		if currentTerm != leaderTerm {
+			return
 		}
-		if !ok { // no reply, repeat sending RPC
-			DPrintf("leader %d of term %d didn't get AppendEntries reply from server %d, retry later\n", rf.me, leaderTerm, server)
-			rf.mu.Unlock()
+		if !gotReply { // no reply, repeat sending RPC
+			//DPrintf("leader [%d] of term %d didn't get AppendEntries reply from server %d, retry later\n", rf.me, leaderTerm, server)
 			time.Sleep(50 * time.Millisecond)
 			continue
 		}
-
+		rf.mu.Lock()
 		if reply.Term > leaderTerm { // new leader occurred
+			rf.becomeFollowerL(reply.Term)
 			rf.mu.Unlock()
-			return false
+			return
 		}
 		if reply.Success {
-			DPrintf("leader %d of term %d got success reply from server %d, update nextIndex and matchIndex if needed", rf.me, leaderTerm, server)
-			if rf.nextIndex[server] == nextIndex { // double check, in case nextIndex[server] has changed
+			DPrintf("leader [%d] of term %d got success reply from server %d, update nextIndex and matchIndex if needed", rf.me, leaderTerm, server)
+			if rf.nextIndex[server] == nextIndex && lastLogIndex >= nextIndex { // double check, in case nextIndex[server] has changed
 				rf.nextIndex[server] = lastLogIndex + 1
-				DPrintf("leader %d of term %d update nextIndex[%d]: %d\n", rf.me, leaderTerm, server, rf.nextIndex[server])
+				DPrintf("leader [%d] of term %d update nextIndex[%d]: %d\n", rf.me, leaderTerm, server, rf.nextIndex[server])
 			}
-			if rf.matchIndex[server] == matchIndex { // double check
+			if rf.matchIndex[server] == matchIndex && lastLogIndex > matchIndex { // double check
 				rf.matchIndex[server] = lastLogIndex
-				DPrintf("leader %d of term %d update matchIndex[%d]: %d\n", rf.me, leaderTerm, server, rf.matchIndex[server])
+				DPrintf("leader [%d] of term %d update matchIndex[%d]: %d\n", rf.me, leaderTerm, server, rf.matchIndex[server])
 			}
-			if cond != nil {
-				cond.Broadcast() // wake up committer goroutine
+			if commitCond != nil {
+				commitCond.Broadcast() // wake up committer goroutine
 			}
 			rf.mu.Unlock()
-			return true
+			return
 		} else { // consistency check failed, decrement nextIndex and retry immediately
 			DPrintf("leader %d of term %d: server %d consistency check failed, decrement nextIndex[server] and retry immediately\n", rf.me, leaderTerm, server)
 			nextIndex := reply.ConflictingTermFirstIndex
@@ -176,9 +177,8 @@ func (rf *Raft) callAppendEntries(server, leaderTerm int, cond *sync.Cond) bool 
 			rf.mu.Unlock()
 		}
 		// DPrintf("AppendEntries try %d\n", i)
-		retryCount++
+		//retryCount++
 	}
-	return false
 }
 
 // for a leader to broadcast heartbeats or AppendEntries RPC periodically to all servers.
@@ -187,75 +187,64 @@ func (rf *Raft) broadCastPeriodically() {
 	leaderTerm := rf.currentTerm
 	N := rf.commitIndex + 1 // for commit check
 	rf.mu.Unlock()
-	DPrintf("leader %d in term %d start broadCast heartbeats to all servers\n", rf.me, leaderTerm)
-	var done int32 = 0 // new leader emerges
+	DPrintf("leader [%d] in term %d start broadcasting AE to all servers\n", rf.me, leaderTerm)
+	defer DPrintf("leader [%d] in term %d stop broadcasting AE to all servers\n", rf.me, leaderTerm)
 
 	// commitIndex update watcher
-	cond := sync.NewCond(&rf.mu) // condition variable
-	go func() {
-		rf.mu.Lock()
-		defer rf.mu.Unlock()
-		for !rf.killed() {
-			if rf.currentTerm != leaderTerm {
-				return
-			}
-			if N < len(rf.log) && rf.log[N].Term != leaderTerm {
-				// important! only wait when log[N].Term is current term!
-				N++
-				continue
-			}
-			for !rf.majorityCheck(N) {
-				cond.Wait()
-			}
-			rf.commitIndex = N
-			DPrintf("leader %d of term %d commitIndex updated: %d\n", rf.me, leaderTerm, N)
-
-			DPrintf("leader %d of term %d lastApplied: %d, commitIndex :%d\n", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
-
-			rf.notifyApply()
-			N++
-		}
-	}()
+	commitCond := sync.NewCond(&rf.mu) // condition variable
+	go rf.logCommitter(N, leaderTerm, commitCond)
 
 	for !rf.killed() {
 		// before sending heartbeats, check if rf.me is still a valid leader
 		curTerm, isLeader := rf.GetState()
 		if !isLeader || curTerm != leaderTerm { // rf.me is no longer leader or/and leaderTerm out of date
+			//DPrintf("leader [%d] term %d is no longer leader, stop broadcasting\n", rf.me, curTerm)
 			return
 		}
-		for pr := range rf.peers {
-			if pr == rf.me {
-				continue
-			}
-			go func(server int) {
-				ok := rf.callAppendEntries(server, leaderTerm, cond)
-				if !ok { // a new leader of higher term occurred
-					atomic.StoreInt32(&done, 1)
-				}
-			}(pr)
-		}
-		if atomic.LoadInt32(&done) == 1 {
-			DPrintf("leader %d of term %d is no longer leader, stop broadcasting\n", rf.me, leaderTerm)
-			return
-		}
+		rf.broadcastAppendEntries(leaderTerm, commitCond)
 		time.Sleep(120 * time.Millisecond)
 	}
 }
 
-// broadcastAppendEntriesImmediately is called when client calls start() and provides a new command.
-// assuming lock held.
-func (rf *Raft) broadcastAppendEntriesImmediately()  {
-	leaderTerm := rf.currentTerm
+func (rf *Raft) logCommitter(N int, leaderTerm int, cond *sync.Cond) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	for !rf.killed() {
+		if rf.currentTerm != leaderTerm {
+			return
+		}
+		if N < len(rf.log) && rf.log[N].Term != leaderTerm {
+			// important! only wait when log[N].Term is current term!
+			N++
+			continue
+		}
+		for !rf.majorityCheckL(N) {
+			cond.Wait()
+		}
+		rf.commitIndex = N
+		DPrintf("leader [%d] of term %d commitIndex updated: %d\n", rf.me, leaderTerm, N)
+
+		DPrintf("leader [%d] of term %d lastApplied: %d, commitIndex :%d\n", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
+
+		rf.notifyApply()
+		N++
+	}
+}
+
+// broadcast AppendEntries RPC to all followers.
+func (rf *Raft) broadcastAppendEntries(leaderTerm int, cond *sync.Cond)  {
+	//leaderTerm := rf.currentTerm
 	for pr := range rf.peers {
 		if pr == rf.me {
 			continue
 		}
-		go rf.callAppendEntries(pr, leaderTerm, nil)
+		go rf.callAppendEntries(pr, leaderTerm, cond)
 	}
 }
 
 // check if log entries before(including) index N is replicated on majority of the cluster.
-func (rf *Raft) majorityCheck(N int) bool {
+// assuming lock held.
+func (rf *Raft) majorityCheckL(N int) bool {
 	if N >= len(rf.log) || rf.log[N].Term != rf.currentTerm { // entry of last term, return
 		return false
 	}

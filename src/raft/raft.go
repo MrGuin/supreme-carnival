@@ -122,6 +122,7 @@ func (rf *Raft) GetState() (int, bool) {
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
+// assuming lock held.
 //
 func (rf *Raft) persist() {
 	// Your code here (2C).
@@ -167,6 +168,22 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	reader := bytes.NewBuffer(data)
+	decoder := labgob.NewDecoder(reader)
+	var currentTerm, votedFor int
+	var logs []LogEntry
+	if err := decoder.Decode(&currentTerm); err != nil {
+		log.Fatal(err)
+	}
+	if err := decoder.Decode(&votedFor); err != nil {
+		log.Fatal(err)
+	}
+	if err := decoder.Decode(&logs); err != nil {
+		log.Fatal(err)
+	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.currentTerm, rf.votedFor, rf.log = currentTerm, votedFor, logs
 }
 
 //
@@ -239,8 +256,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Index:   index,
 	}
 	rf.log = append(rf.log, entry)
-	rf.broadcastAppendEntriesImmediately()
-	//DPrintf("leader %d term %d append new command from client %+v\n", rf.me, rf.currentTerm, entry)
+	rf.persist()
+	//DPrintf("leader [%d] term %d append new command from client %+v\n", rf.me, rf.currentTerm, entry)
 	rf.matchIndex[rf.me] = index
 	return index, term, isLeader
 }
@@ -292,11 +309,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 	rf.applyCond = sync.NewCond(&rf.mu)
 
-	DPrintf("server %d term %d initialized\n", rf.me, rf.currentTerm)
+	DPrintf("server [%d] term %d initialized\n", rf.me, rf.currentTerm)
 
 	// election timeout watcher
 	go func() {
-		DPrintf("server %d election timeout watcher started\n", rf.me)
+		DPrintf("server [%d] election timeout watcher started\n", rf.me)
 		for !rf.killed() {
 			electionTimeout := genTimeout()
 			select {
@@ -307,7 +324,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 					rf.becomeCandidate()
 				}
 			case <-rf.resetTimeoutCh:
-				DPrintf("server %d election timeout reset\n", rf.me)
+				DPrintf("server [%d] election timeout reset\n", rf.me)
 				continue
 			}
 		}
@@ -329,7 +346,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				}
 				rf.mu.Unlock() // release the lock since sending might block
 				rf.applyCh <- aplMsg
-				DPrintf("server %d term %d apply log entry: [%d]\n", rf.me, rf.currentTerm, i)
+				DPrintf("server [%d] term %d apply log entry: [%d]\n", rf.me, rf.currentTerm, i)
 				rf.mu.Lock()
 			}
 			rf.lastApplied = rf.commitIndex // update lastApplied after every commitment
