@@ -309,6 +309,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 	rf.applyCond = sync.NewCond(&rf.mu)
 
+	// initialize from state persisted before a crash
+	rf.readPersist(persister.ReadRaftState())
+
 	DPrintf("server [%d] term %d initialized\n", rf.me, rf.currentTerm)
 
 	// election timeout watcher
@@ -352,9 +355,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			rf.lastApplied = rf.commitIndex // update lastApplied after every commitment
 		}
 	}()
-
-	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
 
 	return rf
 }
